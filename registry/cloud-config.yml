@@ -1,0 +1,17 @@
+#cloud-config
+users:
+  - name: docker
+    groups: sudo
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+package_update: true
+apt_sources:
+  - source: "ppa:certbot/certbot"
+apt_upgrade: true
+packages:
+  - python-certbot-nginx
+  - apache2-utils
+runcmd:
+  - [ sudo, certbot, --agree-tos, -n, certonly, --keep-until-expiring, --standalone, -d, registry.agilebrazil.com, --email, sistemas@agilebrazil.com]
+  - echo "15 3 * * * /usr/bin/certbot renew --quiet" >> certbot-cron.txt
+  - [ crontab, certbot-cron.txt ]

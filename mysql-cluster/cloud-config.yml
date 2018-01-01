@@ -1,0 +1,122 @@
+#cloud-config
+users:
+  - name: mysql
+    groups: sudo
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh-authorized-keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDbDaK75cmVsMpWeU0w7RrB8BtebE9epPSaQhQpLw9RRkDoxfjBhuV2dRuSvnJEJ+Zh0teYi741E5ZbYBIH7LmugxKJNvtzk8qOTaXyBnz2DfvmvnLfAlGaPXlNlJbradxwnLHSMGM0wxe7dKyZmmuhvMYWkRjiwWqyjsXbHAQcinJmCGLEOJKlN4etwg2RkJEYDk9evf1+lIroRxpfgt/RB6uMYH4xgQ6YBvaJoCigVEjvd3oAmH0A1Cezi59ZB9omeaCH/Ttj6wfX5iN5F745WJsRNBClRagWsJCXfawJHPBXTKMEgoSIZwzcKWpgii2xw1MnwU0afyS5ILUWM7O3udrTNMWj11C65UWMcdPB6lN0M/Lp5hd7MkFKNLWo2kMXitRv+aY2IDrX78ZoZI0iKQq/sV1lwu59QYAwVhLMSJ3F1yCxl3JN0sZL1J33LDYwApqbk0IuY7Q9O1TdxubyJ9gyrV7Rey7IkvSk0kkRnLXiCkwO0C/JudZqgQoRn48KrucXGhy4Iz/FO7SlWVqKiyseuJGtEE5tfyfNTPpbwi6Kf9ASAza3UlWnyLbFKjxZf/zV13hHIdnTbTKBSUWyNTKhADVKUmv5nx1JYS/p2pZASmAgRj8kENZQFJcu2AdXvWzxfHk3PKLlmMS7JfOq/Ebak15QQRQc0of/ro45+w== hugocorbucci@digitalocean.com
+apt_update: true
+apt_upgrade: true
+packages:
+  - expect
+write_files:
+- path: /tmp/my.cnf.template
+  content: |
+    !includedir /etc/mysql/conf.d/
+    !includedir /etc/mysql/mysql.conf.d/
+
+    [mysqld]
+
+    # General replication settings
+    gtid_mode = ON
+    enforce_gtid_consistency = ON
+    master_info_repository = TABLE
+    relay_log_info_repository = TABLE
+    binlog_checksum = NONE
+    log_slave_updates = ON
+    log_bin = binlog
+    binlog_format = ROW
+    transaction_write_set_extraction = XXHASH64
+    loose-group_replication_bootstrap_group = OFF
+    loose-group_replication_start_on_boot = OFF
+    loose-group_replication_ssl_mode = REQUIRED
+    loose-group_replication_recovery_use_ssl = 1
+
+    # Shared replication group configuration
+    loose-group_replication_group_name = "<GROUP_NAME>"
+    loose-group_replication_ip_whitelist = "<IP_LIST>"
+    loose-group_replication_group_seeds = "<GROUP_SEEDS>"
+
+    # Single or Multi-primary mode? Uncomment these two lines
+    # for multi-primary mode, where any host can accept writes
+    loose-group_replication_single_primary_mode = OFF
+    loose-group_replication_enforce_update_everywhere_checks = ON
+
+    # Host specific replication configuration
+    server_id = <SERVER_ID>
+    bind-address = "<SERVER_IP>"
+    report_host = "<SERVER_IP>"
+    loose-group_replication_local_address = "<SERVER_IP>:33061"
+- path: /tmp/generate_my_cnf.sh
+  permissions: 755
+  content: |
+    #!/bin/bash
+    set -e
+    DROPLET_ID=$(curl -s http://169.254.169.254/metadata/v1/id)
+    while [ -z "${SERVER_IP}" ]; do
+      sleep 1;
+      SERVER_IP=$(curl -s http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)
+    done
+    sed -i -e "s/<SERVER_ID>/${DROPLET_ID}/g" /tmp/my.cnf.template
+    sed -i -e "s/<SERVER_IP>/${SERVER_IP}/g" /tmp/my.cnf.template
+- path: /tmp/install_secure_mysql.sh
+  permissions: 755
+  content: |
+    #!/bin/bash
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    export MYSQL_ROOT_PASSWORD=$1
+    cd /tmp
+    curl -OL https://dev.mysql.com/get/mysql-apt-config_0.8.9-1_all.deb
+    echo mysql-apt-config mysql-apt-config/select-product select Ok | debconf-set-selections
+    echo mysql-server/root_password password $MYSQL_ROOT_PASSWORD | debconf-set-selections
+    echo mysql-server/root_password_again password $MYSQL_ROOT_PASSWORD | debconf-set-selections
+    dpkg -i mysql-apt-config_0.8.9-1_all.deb
+    apt-get update
+    apt-get install -y mysql-server
+    SECURE_MYSQL=$(expect -c "
+    set timeout 10
+    spawn mysql_secure_installation
+    expect \"Press y|Y for Yes, any other key for No:\"
+    send \"y\r\"
+
+    expect \"Please enter 0 = LOW, 1 = MEDIUM and 2 = STRONG:\"
+    send \"2\r\"
+
+    expect \"New password:\"
+    send \"${MYSQL_ROOT_PASSWORD}\r\"
+
+    expect \"Re-enter new password:\"
+    send \"${MYSQL_ROOT_PASSWORD}\r\"
+
+    expect \"Do you wish to continue with the password provided?(Press y|Y for Yes, any other key for No) :\"
+    send \"y\r\"
+
+    expect \"Remove anonymous users? (Press y|Y for Yes, any other key for No) :\"
+    send \"y\r\"
+
+    expect \"Disallow root login remotely? (Press y|Y for Yes, any other key for No) :\"
+    send \"y\r\"
+
+    expect \"Remove test database and access to it? (Press y|Y for Yes, any other key for No) :\"
+    send \"y\r\"
+
+    expect \"Reload privilege tables now? (Press y|Y for Yes, any other key for No) :\"
+    send \"y\r\"
+    expect eof
+    ")
+
+    echo "$SECURE_MYSQL"
+
+runcmd:
+  - sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/g' /etc/ssh/sshd_config
+  - sed -i -e '/^PermitRootLogin/s/^.*$/PermitRootLogin no/' /etc/ssh/sshd_config
+  - sed -i -e '$aAllowUsers mysql' /etc/ssh/sshd_config
+  - sudo service sshd reload
+  - sudo ufw allow OpenSSH
+  - sudo ufw allow 3306
+  - sudo ufw allow 33061
+  - sudo ufw -f enable
+  - /tmp/install_secure_mysql.sh replaceMePassword
+  - /tmp/generate_my_cnf.sh
